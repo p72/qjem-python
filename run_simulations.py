@@ -38,10 +38,12 @@ VAR_INFO = {
     "GAP": ("Output gap", "pp"),
     "IG": ("Real Public Investment", "%"),
     "GDPN": ("Nominal GDP", "%"),
+    "IH": ("Real Private Residential Investment", "%"),
 }
 BOJ_VARS = ["GDP", "CP", "INV", "EX", "IM", "CPIXFOR"]
 MP_VARS = ["CALL", "IRL", "GDP", "GAP", "CP", "INV", "FXYEN", "CPIXFOR"]
 FISCAL_VARS = ["GDP", "GAP", "IG", "CP", "INV", "IM", "CALL", "CPIXFOR"]
+TAX_VARS = ["GDP", "GAP", "CP", "IH", "INV", "IM", "CALL", "CPIXFOR"]
 
 
 def forward_guidance_segments(n_peg, bp):
@@ -58,8 +60,43 @@ def forward_guidance_segments(n_peg, bp):
     return segs
 
 
+def consumption_tax_shocks(dtau, q_hike=2, timing=True):
+    """Shocks for a permanent `dtau` percentage-point change in the consumption
+    tax rate, implemented at quarter `q_hike`.
+
+    Q-JEM carries the tax through dummies whose multipliers in the equations are
+    the historical rate changes in percentage points (3 for 1989 and 2014, 2 for
+    1997), so dividing a dummy by its multiplier scales that channel to dtau:
+
+      D142  (2014Q2) C_PCP(4)*3*D142 etc. -> PCP, PIH and PIG, i.e. the price
+                     level; and C_IM(8)*3*D142 -> the post-hike drop in imports
+      D141  (2014Q1) C_IM(7)*3*D141 -> the pre-hike surge in imports
+      D892  (1989Q2) the same PCP/PIH/PIG channel, but 1989 is not in the import
+                     equation, so it carries no front-loading/payback terms
+      D151Z (step)   C_SNAVAT(4)*D151Z -> consumption tax revenue over GDPN
+      VAT*           the tax wedge in the published (tax-inclusive) CPI
+
+    With timing=False the price channel is routed through D892 instead of D142,
+    which drops the front-loading and payback in imports and leaves the
+    permanent effects only. Note that Q-JEM estimates the front-loading of
+    *imports* but has no matching inventory build-up (KIV follows GDP growth
+    only), so in the run-up quarter the surge in imports subtracts from real GDP
+    with nothing offsetting it.
+    """
+    h = q_hike
+    px = "D142" if timing else "D892"
+    shocks = [(px, "add", dtau / 3, h, h),           # price level, one quarter
+              ("D151Z", "add", dtau / 3, h, H)]      # tax revenue, permanent
+    if timing:
+        shocks.append(("D141", "add", dtau / 3, h - 1, h - 1))   # front-loading
+    shocks += [(v, "vat", dtau, h, H)
+               for v in ("VATCPIXFOR", "VATCPIXFENOR", "VATCPIENOR")]
+    return shocks
+
+
 # shocks   : (series, op, value, first quarter, last quarter)  1-based
-#            op = "mul" (scale), "add" (level), "gdp%" (add value% of baseline real GDP)
+#            op = "mul" (scale), "add" (level), "gdp%" (add value% of baseline
+#            real GDP), "vat" (consumption tax wedge for value pp of tax rate)
 # segments : (number of quarters, endo2exog, exog2endo[, pinned]) in sequence;
 #            pinned = {endogenous var: pp added to baseline}, equation dropped
 SIMS = {
@@ -122,6 +159,25 @@ SIMS = {
         shocks=[("IG", "gdp%", 1.0, 1, 8)],
         segments=[(H, ["IG"], ["V_IG"])],
         plot=FISCAL_VARS, multiplier="IG"),
+    # --- consumption tax (not in the paper; no published benchmark) ---
+    "Sim11": dict(
+        title="Consumption tax raised by 2pp in quarter 2\n"
+              "(with the front-loading and payback in imports)",
+        shocks=consumption_tax_shocks(2.0),
+        segments=[(H, [], [])],
+        plot=TAX_VARS, tax_rate=2.0),
+    "Sim12": dict(
+        title="Consumption tax cut by 2pp in quarter 2\n"
+              "(with the front-loading and payback in imports)",
+        shocks=consumption_tax_shocks(-2.0),
+        segments=[(H, [], [])],
+        plot=TAX_VARS, tax_rate=-2.0),
+    "Sim13": dict(
+        title="Consumption tax raised by 2pp in quarter 2,\n"
+              "permanent effects only (no import front-loading or payback)",
+        shocks=consumption_tax_shocks(2.0, timing=False),
+        segments=[(H, [], [])],
+        plot=TAX_VARS, tax_rate=2.0),
 }
 COMPARE = [("Sim6", "Sim7", "Without vs with forward guidance (8-quarter +100bp peg)",
             "without FG", "with FG"),
@@ -129,7 +185,12 @@ COMPARE = [("Sim6", "Sim7", "Without vs with forward guidance (8-quarter +100bp 
             "monetary policy reaction vs accommodation",
             "Taylor rule", "rate pegged 8Q"),
            ("Sim8", "Sim10", "Public investment (+1% of GDP): permanent vs temporary",
-            "permanent", "8 quarters only")]
+            "permanent", "8 quarters only"),
+           ("Sim11", "Sim12", "Consumption tax: 2pp hike vs 2pp cut",
+            "+2pp hike", "-2pp cut"),
+           ("Sim11", "Sim13", "Consumption tax +2pp: with vs without the "
+            "front-loading/payback in imports",
+            "with timing effects", "permanent effects only")]
 
 
 def run_sim(m, sim):
@@ -139,6 +200,10 @@ def run_sim(m, sim):
         sl = slice(t0 + q_from - 1, t0 + q_to)
         if op == "mul":
             X[m.vidx[var], sl] *= val
+        elif op == "vat":
+            # C_PCP(4) is the estimated pass-through of 1pp of consumption tax
+            # into the consumption deflator; the CPI wedge uses the same rate.
+            X[m.vidx[var], sl] += m.coefs["C_PCP"][3] * val
         elif op == "gdp%":
             X[m.vidx[var], sl] += val / 100 * m.base[m.vidx["GDP"], sl]
         else:
@@ -167,6 +232,14 @@ def multipliers(m, X, gvar, t0, t1):
     live = np.abs(dg) > 1e-6
     per = np.where(live, dy / np.where(live, dg, 1.0), np.nan)
     return per, np.cumsum(dy) / np.cumsum(dg)
+
+
+def tax_revenue(m, X, t0, t1):
+    """Consumption tax revenue as a share of nominal GDP, change from baseline
+    in percentage points."""
+    def ratio(A):
+        return A[m.vidx["SNAVAT"], t0:t1 + 1] / A[m.vidx["GDPN"], t0:t1 + 1]
+    return (ratio(X) - ratio(m.base)) * 100
 
 
 def plot(sim_name, sim, dev):
@@ -215,7 +288,7 @@ def main():
                     [np.abs(m.base[:, t0:t1 + 1]) > 1e-6])
     print(f"baseline reproduction: max relative deviation = {dev:.2e}")
 
-    rows, all_devs, mult_rows = [], {}, []
+    rows, all_devs, mult_rows, tax_rows = [], {}, [], []
     for name, sim in SIMS.items():
         tic = time.time()
         X = run_sim(m, sim)
@@ -226,6 +299,13 @@ def main():
             per, cum = multipliers(m, X, sim["multiplier"], t0, t1)
             mult_rows += [dict(sim=name, h=h + 1, impact=p_, cumulative=c)
                           for h, (p_, c) in enumerate(zip(per, cum))]
+        if sim.get("tax_rate"):
+            rev = tax_revenue(m, X, t0, t1)
+            gdp = deviation(m, X, "GDP", t0, t1)
+            tax_rows += [dict(sim=name, h=h + 1, tax_rate_pp=sim["tax_rate"],
+                              revenue_gdp_pp=r, gdp_pct=g,
+                              gdp_pct_per_pp=g / sim["tax_rate"])
+                         for h, (r, g) in enumerate(zip(rev, gdp))]
         for v, arr in devs.items():
             rows += [dict(sim=name, variable=v, unit=VAR_INFO[v][1], quarter=q, h=h + 1, diff=x)
                      for h, (q, x) in enumerate(zip(quarters, arr))]
@@ -249,6 +329,14 @@ def main():
         print("\nReal GDP multiplier of public investment (dY/dG)")
         print(md[md.h.isin([1, 4, 8, 12, 20])].pivot_table(
             index=["sim"], columns="h", values=["impact", "cumulative"], sort=False))
+
+    if tax_rows:
+        td = pd.DataFrame(tax_rows)
+        td.to_csv(os.path.join(OUT, "tax_revenue.csv"), index=False)
+        print("\nConsumption tax: revenue (pp of nominal GDP) and real GDP (%)")
+        print(td[td.h.isin([1, 2, 4, 8, 12, 20])].pivot_table(
+            index=["sim"], columns="h",
+            values=["revenue_gdp_pp", "gdp_pct"], sort=False))
 
 
 if __name__ == "__main__":
