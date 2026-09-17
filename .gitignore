@@ -1,0 +1,7 @@
+# BOJ replication files are downloaded at runtime, not redistributed
+data/
+
+__pycache__/
+*.pyc
+.venv/
+venv/

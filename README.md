@@ -1,0 +1,88 @@
+# qjem-python
+
+日本銀行の大規模マクロ経済モデル **Q-JEM（2019年版）** を、EViews なしで **Python だけ**で解くための非公式実装です。
+
+*An unofficial pure-Python solver for the Bank of Japan's Quarterly Japanese Economic Model (Q-JEM, 2019 version). It reads the BOJ's official EViews replication files and reproduces Figures 6–9 of the working paper without EViews.*
+
+> **注意**：本リポジトリは日本銀行および論文著者とは無関係の個人による実装です。シミュレーション結果は日本銀行の公式見解を示すものではありません。
+
+## 出典
+
+Hirakata, N., Kan, K., Kanafuji, A., Kido, Y., Kishaba, Y., Murakoshi, T., and Shinohara, T. (2019).
+"The Quarterly Japanese Economic Model (Q-JEM): 2019 version."
+*Bank of Japan Working Paper Series*, No.19-E-7.
+https://www.boj.or.jp/en/research/wps_rev/wps_2019/wp19e07.htm
+
+モデルの式、係数、ベースラインデータ、論文、モデル資料の著作権は日本銀行と著者に帰属します。これらは**本リポジトリに含まれておらず**、初回実行時に日本銀行のウェブサイトから公式の replication files（`wp19e07.zip`）を自動でダウンロードして使います。
+
+## 使い方
+
+```bash
+pip install -r requirements.txt
+python run_simulations.py
+```
+
+初回実行時に `data/wp19e07/` へ日銀の配布物が展開されます。7本のシミュレーションは合計10秒程度で終わり、結果は `output/` に出力されます。
+
+- `output/SimN.png`：各シナリオの図
+- `output/Sim6_vs_Sim7.png`：フォワードガイダンスの有無の比較
+- `output/responses.csv`：ベースラインからの乖離（水準の変数は%、金利とGAPは%ポイント）
+
+## シミュレーション
+
+| | シナリオ | 論文との対応 |
+|---|---|---|
+| Sim1 | 海外GDP +1%（恒久的） | Figure 6（Figure 10 の Q-JEM の線） |
+| Sim2 | 原油価格 −10%（恒久的） | Figure 7 |
+| Sim3 | Sim1 と Sim2 の同時発生 | Figure 8 |
+| Sim4 | ドル円 10% 円安（恒久的） | Figure 9 |
+| Sim5 | 政策金利ショック +100bp（1期のみ、以後テイラー・ルール） | 論文になし |
+| Sim6 | コールレートを8四半期 +100bp に固定し、その後ルールに戻す | 論文になし |
+| Sim7 | Sim6 に、信頼されたフォワードガイダンスを加えたもの | 論文になし |
+
+Sim1〜4 は、論文の図と6変数すべてで形・大きさが一致することを目視で確認しています（論文に数値表はありません）。また、ショックを与えずに解くとベースラインを相対誤差 1e-10 で再現します。
+
+![Sim4](output/Sim4.png)
+
+### フォワードガイダンス（Sim7）
+
+Q-JEM の予想コールレート `ZCALL_V1`〜`ZCALL_V39` は、テイラー・ルールで先の金利を予想する後ろ向きの期待です。そのため、Sim6 のように金利を固定するだけでは「据え置きの約束」が期待に反映されません。Sim7 では、据え置き期間の k 期目に、残り 8−k 期分の予想金利を約束した水準に固定し（その期間の式を外し）、その先はモデル本来の予想式がつながるようにしています。
+
+`forward_guidance_segments(8, 1.0)` の2番目の引数を小さくすると、部分的にしか信頼されないケースを表せます。
+
+![Sim6 vs Sim7](output/Sim6_vs_Sim7.png)
+
+## 実装
+
+| ファイル | 内容 |
+|---|---|
+| `fetch_boj.py` | 日本銀行サイトから replication files を取得・展開 |
+| `wf1reader.py` | EViews のワークファイル（`.wf1`）の読み込み（バイナリ形式を解析して実装） |
+| `eviews_expr.py` | EViews の式を Python の残差関数に変換。`D`、`DLOG`、`@MOVAV`、`@MOVSUM` とラグはコンパイル時に時点ずらしとして展開 |
+| `qjem.py` | 内生・外生の入れ替え、二部マッチングと Tarjan 法によるブロック分解、各期のニュートン法による求解 |
+| `run_simulations.py` | 日銀の `calc_response_to_exogenous_shocks.prg` の移植と、金融政策シナリオの追加 |
+
+EViews の `m.control`（目標とする軌道に合わせて外生のショックを逆算する機能）は、「目標とする変数を外生に、ショック `V_*` を内生に入れ替えて同時に解く」ことで置き換えています。871本の式は664ブロックに分解され、同時に解く必要があるのは最大128本のブロックです。
+
+### 独自シナリオ
+
+`run_simulations.py` の `SIMS` に追加します。
+
+```python
+"MySim": dict(
+    title="...",
+    shocks=[("POIL", "mul", 1.2, 1, 20)],          # (系列, "mul"/"add", 値, 開始期, 終了期)
+    segments=[(20, ["POIL"], ["V_POIL"])],          # (期数, 外生にする変数, 代わりに内生にする変数)
+    plot=BOJ_VARS),
+```
+
+## データについて
+
+日銀が配布する `BASECASE.wf1` のベースラインは**架空の定常状態**（0001Q1〜0010Q4 の40期）で、実際の時系列データではありません。公式統計が使われているのは係数の推計で、推計期間はおおむね1980年代〜2018年です（日銀配布の `qjem_html/qjemdoc.html` に式ごとの期間と変数ごとの出典が載っています）。
+
+- 主な出典：内閣府「国民経済計算」、総務省「労働力調査」「消費者物価指数」、厚生労働省「毎月勤労統計」、日本銀行（コール市場関連統計、短観、資金循環統計）、財務省（国際収支統計、貿易統計、法人企業統計）、東京証券取引所、BIS、米国の BEA・BLS・CBO・FRB
+- ゼロ金利制約はモデルに含まれていません（論文の脚注13）
+
+## ライセンス
+
+本リポジトリの Python コードは MIT License です。Q-JEM のモデル、係数、データ、論文、資料には適用されません。日本銀行の資料を商用目的で転載・複製する場合は、事前に日本銀行情報サービス局に相談する必要があります（日本銀行ワーキングペーパーシリーズの注記より）。
