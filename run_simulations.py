@@ -44,6 +44,8 @@ BOJ_VARS = ["GDP", "CP", "INV", "EX", "IM", "CPIXFOR"]
 MP_VARS = ["CALL", "IRL", "GDP", "GAP", "CP", "INV", "FXYEN", "CPIXFOR"]
 FISCAL_VARS = ["GDP", "GAP", "IG", "CP", "INV", "IM", "CALL", "CPIXFOR"]
 TAX_VARS = ["GDP", "GAP", "CP", "IH", "INV", "IM", "CALL", "CPIXFOR"]
+STAGFLATION_VARS = ["GDP", "GAP", "CPIXFOR", "CALL", "CP", "INV",
+                    "EX", "IM", "IRL", "FXYEN"]
 
 
 def forward_guidance_segments(n_peg, bp):
@@ -178,6 +180,27 @@ SIMS = {
         shocks=consumption_tax_shocks(2.0, timing=False),
         segments=[(H, [], [])],
         plot=TAX_VARS, tax_rate=2.0),
+    # --- supply shock / stagflation (not in the paper; no published benchmark) ---
+    # Roughly the 2021Q4-2022Q3 move: Brent about +50%, USD/JPY 114 -> 144.
+    "Sim14": dict(
+        title="Oil price permanently 50% higher\n"
+              "(the exchange rate responds through the model)",
+        shocks=[("POIL", "mul", 1.5, 1, H)],
+        segments=[(H, ["POIL"], ["V_POIL"])],
+        plot=STAGFLATION_VARS),
+    "Sim15": dict(
+        title="Oil price permanently 50% higher and the yen 20% weaker\n"
+              "(both held on the shocked path; Taylor rule)",
+        shocks=[("POIL", "mul", 1.5, 1, H), ("FXYEN", "mul", 1.2, 1, H)],
+        segments=[(H, ["POIL", "FXYEN"], ["V_POIL", "V_FXYEN"])],
+        plot=STAGFLATION_VARS),
+    "Sim16": dict(
+        title="Oil 50% higher and the yen 20% weaker, with the call rate\n"
+              "held at baseline for 8 quarters (no policy tightening)",
+        shocks=[("POIL", "mul", 1.5, 1, H), ("FXYEN", "mul", 1.2, 1, H)],
+        segments=[(8, ["POIL", "FXYEN", "CALL"], ["V_POIL", "V_FXYEN", "V_CALL"]),
+                  (H - 8, ["POIL", "FXYEN"], ["V_POIL", "V_FXYEN"])],
+        plot=STAGFLATION_VARS),
 }
 COMPARE = [("Sim6", "Sim7", "Without vs with forward guidance (8-quarter +100bp peg)",
             "without FG", "with FG"),
@@ -190,7 +213,11 @@ COMPARE = [("Sim6", "Sim7", "Without vs with forward guidance (8-quarter +100bp 
             "+2pp hike", "-2pp cut"),
            ("Sim11", "Sim13", "Consumption tax +2pp: with vs without the "
             "front-loading/payback in imports",
-            "with timing effects", "permanent effects only")]
+            "with timing effects", "permanent effects only"),
+           ("Sim14", "Sim15", "Oil +50%: exchange rate free vs the yen also 20% weaker",
+            "oil only", "oil + weak yen"),
+           ("Sim15", "Sim16", "Oil +50% and yen -20%: Taylor rule vs no tightening",
+            "Taylor rule", "rate pegged 8Q")]
 
 
 def run_sim(m, sim):
