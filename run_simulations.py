@@ -36,9 +36,12 @@ VAR_INFO = {
     "IRL": ("10-year JGB yield", "pp"),
     "FXYEN": ("USD/JPY (+ = yen depreciation)", "%"),
     "GAP": ("Output gap", "pp"),
+    "IG": ("Real Public Investment", "%"),
+    "GDPN": ("Nominal GDP", "%"),
 }
 BOJ_VARS = ["GDP", "CP", "INV", "EX", "IM", "CPIXFOR"]
 MP_VARS = ["CALL", "IRL", "GDP", "GAP", "CP", "INV", "FXYEN", "CPIXFOR"]
+FISCAL_VARS = ["GDP", "GAP", "IG", "CP", "INV", "IM", "CALL", "CPIXFOR"]
 
 
 def forward_guidance_segments(n_peg, bp):
@@ -55,7 +58,8 @@ def forward_guidance_segments(n_peg, bp):
     return segs
 
 
-# shocks   : (series, "mul"/"add", value, first quarter, last quarter)  1-based
+# shocks   : (series, op, value, first quarter, last quarter)  1-based
+#            op = "mul" (scale), "add" (level), "gdp%" (add value% of baseline real GDP)
 # segments : (number of quarters, endo2exog, exog2endo[, pinned]) in sequence;
 #            pinned = {endogenous var: pp added to baseline}, equation dropped
 SIMS = {
@@ -99,9 +103,33 @@ SIMS = {
         shocks=[("CALL", "add", 1.0, 1, 8)],
         segments=forward_guidance_segments(8, 1.0),
         plot=MP_VARS),
+    # --- fiscal policy (not in the paper; no published benchmark) ---
+    "Sim8": dict(
+        title="Public investment permanently raised by 1% of real GDP\n"
+              "(monetary policy follows the Taylor rule)",
+        shocks=[("IG", "gdp%", 1.0, 1, H)],
+        segments=[(H, ["IG"], ["V_IG"])],
+        plot=FISCAL_VARS, multiplier="IG"),
+    "Sim9": dict(
+        title="Public investment permanently raised by 1% of real GDP,\n"
+              "call rate held at baseline for 8 quarters (accommodation)",
+        shocks=[("IG", "gdp%", 1.0, 1, H)],
+        segments=[(8, ["IG", "CALL"], ["V_IG", "V_CALL"]), (H - 8, ["IG"], ["V_IG"])],
+        plot=FISCAL_VARS, multiplier="IG"),
+    "Sim10": dict(
+        title="Public investment raised by 1% of real GDP for 8 quarters only\n"
+              "(temporary stimulus, Taylor rule)",
+        shocks=[("IG", "gdp%", 1.0, 1, 8)],
+        segments=[(H, ["IG"], ["V_IG"])],
+        plot=FISCAL_VARS, multiplier="IG"),
 }
 COMPARE = [("Sim6", "Sim7", "Without vs with forward guidance (8-quarter +100bp peg)",
-            "without FG", "with FG")]
+            "without FG", "with FG"),
+           ("Sim8", "Sim9", "Permanent public investment (+1% of GDP): "
+            "monetary policy reaction vs accommodation",
+            "Taylor rule", "rate pegged 8Q"),
+           ("Sim8", "Sim10", "Public investment (+1% of GDP): permanent vs temporary",
+            "permanent", "8 quarters only")]
 
 
 def run_sim(m, sim):
@@ -111,6 +139,8 @@ def run_sim(m, sim):
         sl = slice(t0 + q_from - 1, t0 + q_to)
         if op == "mul":
             X[m.vidx[var], sl] *= val
+        elif op == "gdp%":
+            X[m.vidx[var], sl] += val / 100 * m.base[m.vidx["GDP"], sl]
         else:
             X[m.vidx[var], sl] += val
     t = t0
@@ -127,6 +157,16 @@ def run_sim(m, sim):
 def deviation(m, X, var, t0, t1):
     s, b = X[m.vidx[var], t0:t1 + 1], m.base[m.vidx[var], t0:t1 + 1]
     return s / b * 100 - 100 if VAR_INFO[var][1] == "%" else s - b
+
+
+def multipliers(m, X, gvar, t0, t1):
+    """Real GDP multiplier of a fiscal shock to `gvar`: per-quarter dY/dG and
+    the cumulative (sum of dY so far) / (sum of dG so far)."""
+    dg = X[m.vidx[gvar], t0:t1 + 1] - m.base[m.vidx[gvar], t0:t1 + 1]
+    dy = X[m.vidx["GDP"], t0:t1 + 1] - m.base[m.vidx["GDP"], t0:t1 + 1]
+    live = np.abs(dg) > 1e-6
+    per = np.where(live, dy / np.where(live, dg, 1.0), np.nan)
+    return per, np.cumsum(dy) / np.cumsum(dg)
 
 
 def plot(sim_name, sim, dev):
@@ -175,13 +215,17 @@ def main():
                     [np.abs(m.base[:, t0:t1 + 1]) > 1e-6])
     print(f"baseline reproduction: max relative deviation = {dev:.2e}")
 
-    rows, all_devs = [], {}
+    rows, all_devs, mult_rows = [], {}, []
     for name, sim in SIMS.items():
         tic = time.time()
         X = run_sim(m, sim)
         print(f"{name} solved in {time.time() - tic:.1f}s")
         devs = {v: deviation(m, X, v, t0, t1) for v in sim["plot"]}
         all_devs[name] = devs
+        if sim.get("multiplier"):
+            per, cum = multipliers(m, X, sim["multiplier"], t0, t1)
+            mult_rows += [dict(sim=name, h=h + 1, impact=p_, cumulative=c)
+                          for h, (p_, c) in enumerate(zip(per, cum))]
         for v, arr in devs.items():
             rows += [dict(sim=name, variable=v, unit=VAR_INFO[v][1], quarter=q, h=h + 1, diff=x)
                      for h, (q, x) in enumerate(zip(quarters, arr))]
@@ -198,6 +242,13 @@ def main():
     pd.set_option("display.float_format", "{:.3f}".format)
     pd.set_option("display.max_rows", 200)
     print(summary)
+
+    if mult_rows:
+        md = pd.DataFrame(mult_rows)
+        md.to_csv(os.path.join(OUT, "fiscal_multipliers.csv"), index=False)
+        print("\nReal GDP multiplier of public investment (dY/dG)")
+        print(md[md.h.isin([1, 4, 8, 12, 20])].pivot_table(
+            index=["sim"], columns="h", values=["impact", "cumulative"], sort=False))
 
 
 if __name__ == "__main__":
