@@ -1,0 +1,14 @@
+The MIT License in LICENSE covers only the Python code in this repository.
+
+It does NOT cover the Q-JEM model, its equations, coefficients, baseline data,
+paper or documentation. These are downloaded at runtime from the Bank of Japan
+website and remain the property of the Bank of Japan and the paper's authors:
+
+  Hirakata, N., Kan, K., Kanafuji, A., Kido, Y., Kishaba, Y., Murakoshi, T.,
+  and Shinohara, T. (2019). "The Quarterly Japanese Economic Model (Q-JEM):
+  2019 version." Bank of Japan Working Paper Series, No.19-E-7.
+  https://www.boj.or.jp/en/research/wps_rev/wps_2019/wp19e07.htm
+
+This project is not affiliated with the Bank of Japan. Results do not reflect
+the views of the Bank of Japan. Reproduction of BOJ materials for commercial
+purposes requires prior consultation with the Bank of Japan.
