@@ -40,7 +40,13 @@ VAR_INFO = {
     "GDPN": ("Nominal GDP", "%"),
     "IH": ("Real Private Residential Investment", "%"),
     "YDN": ("Nominal household disposable income", "%"),
+    "ZPIL": ("Long-term inflation expectations (6-10 yrs ahead)", "pp"),
+    "PIQ": ("Trend inflation", "pp"),
+    "PIX": ("Core inflation, q/q annualized (tax-excluded)", "pp"),
+    "RIRL": ("Real 10-year yield (IRL - ZPI10)", "pp"),
 }
+# series computed from model variables rather than read from the workfile
+DERIVED = {"RIRL": lambda m, A: A[m.vidx["IRL"]] - A[m.vidx["ZPI10"]]}
 BOJ_VARS = ["GDP", "CP", "INV", "EX", "IM", "CPIXFOR"]
 MP_VARS = ["CALL", "IRL", "GDP", "GAP", "CP", "INV", "FXYEN", "CPIXFOR"]
 FISCAL_VARS = ["GDP", "GAP", "IG", "CP", "INV", "IM", "CALL", "CPIXFOR"]
@@ -48,6 +54,7 @@ TAX_VARS = ["GDP", "GAP", "CP", "IH", "INV", "IM", "CALL", "CPIXFOR"]
 STAGFLATION_VARS = ["GDP", "GAP", "CPIXFOR", "CALL", "CP", "INV",
                     "EX", "IM", "IRL", "FXYEN"]
 TRANSFER_VARS = ["GDP", "GAP", "YDN", "CP", "INV", "IM", "CPIXFOR", "CALL"]
+EXPECT_VARS = ["ZPIL", "PIQ", "PIX", "CALL", "IRL", "RIRL", "FXYEN", "GDP", "CP", "INV"]
 
 
 def forward_guidance_segments(n_peg, bp):
@@ -243,6 +250,36 @@ SIMS = {
         title="2020 Special Cash Payments (100,000 yen per person):\n"
               "2.37% of nominal GDP, tax-free, over 2 quarters",
         **cash_transfer(2.37, [1, 2])),
+    # --- inflation expectations (not in the paper; no published benchmark) ---
+    # The baseline is a zero-inflation steady state (PIQ_CB = PIQ = ZPIL = 0), so
+    # all rates below are deviations from zero.
+    "Sim20": dict(
+        title="Long-term inflation expectations (ZPIL) permanently 1pp higher,\n"
+              "inflation target unchanged (de-anchoring)",
+        shocks=[("ZPIL", "add", 1.0, 1, H)],
+        segments=[(H, ["ZPIL"], ["V_ZPIL"])],
+        plot=EXPECT_VARS),
+    "Sim21": dict(
+        title="Long-term inflation expectations 1pp higher in quarter 1 only\n"
+              "(the model re-anchors them)",
+        shocks=[("V_ZPIL", "add", 1.0, 1, 1)],
+        segments=[(H, [], [])],
+        plot=EXPECT_VARS),
+    # PIQ = DELTA*BASE(-1) + (1-DELTA)*PIQ_CB: 1-DELTA is the credibility of the
+    # target. DELTA = C_DELTA(1)*DELTA(-1) + C_DELTA(2)*D131, where D131 is the
+    # estimated loss of credibility when the 2% target was adopted in 2013Q1.
+    "Sim22": dict(
+        title="Inflation target raised by 1pp\n"
+              "(credibility at its baseline level)",
+        shocks=[("PIQ_CB", "add", 1.0, 1, H)],
+        segments=[(H, [], [])],
+        plot=EXPECT_VARS),
+    "Sim23": dict(
+        title="Inflation target raised by 1pp, with the credibility loss\n"
+              "estimated for the 2013 adoption of the 2% target (D131)",
+        shocks=[("PIQ_CB", "add", 1.0, 1, H), ("D131", "add", 1.0, 1, 1)],
+        segments=[(H, [], [])],
+        plot=EXPECT_VARS),
 }
 COMPARE = [("Sim6", "Sim7", "Without vs with forward guidance (8-quarter +100bp peg)",
             "without FG", "with FG"),
@@ -261,7 +298,11 @@ COMPARE = [("Sim6", "Sim7", "Without vs with forward guidance (8-quarter +100bp 
            ("Sim15", "Sim16", "Oil +50% and yen -20%: Taylor rule vs no tightening",
             "Taylor rule", "rate pegged 8Q"),
            ("Sim17", "Sim18", "Transfer of 1% of GDP: tax-free vs taxable",
-            "tax-free", "taxable")]
+            "tax-free", "taxable"),
+           ("Sim20", "Sim21", "Inflation expectations +1pp: persistent vs one quarter",
+            "persistent", "one quarter"),
+           ("Sim22", "Sim23", "Inflation target +1pp: baseline credibility vs 2013-style "
+            "credibility loss", "baseline credibility", "2013-style loss")]
 
 
 def run_sim(m, sim):
@@ -294,8 +335,12 @@ def run_sim(m, sim):
     return X
 
 
+def level(m, A, var):
+    return DERIVED[var](m, A) if var in DERIVED else A[m.vidx[var]]
+
+
 def deviation(m, X, var, t0, t1):
-    s, b = X[m.vidx[var], t0:t1 + 1], m.base[m.vidx[var], t0:t1 + 1]
+    s, b = level(m, X, var)[t0:t1 + 1], level(m, m.base, var)[t0:t1 + 1]
     return s / b * 100 - 100 if VAR_INFO[var][1] == "%" else s - b
 
 
