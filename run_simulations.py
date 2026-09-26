@@ -39,6 +39,7 @@ VAR_INFO = {
     "IG": ("Real Public Investment", "%"),
     "GDPN": ("Nominal GDP", "%"),
     "IH": ("Real Private Residential Investment", "%"),
+    "YDN": ("Nominal household disposable income", "%"),
 }
 BOJ_VARS = ["GDP", "CP", "INV", "EX", "IM", "CPIXFOR"]
 MP_VARS = ["CALL", "IRL", "GDP", "GAP", "CP", "INV", "FXYEN", "CPIXFOR"]
@@ -46,6 +47,7 @@ FISCAL_VARS = ["GDP", "GAP", "IG", "CP", "INV", "IM", "CALL", "CPIXFOR"]
 TAX_VARS = ["GDP", "GAP", "CP", "IH", "INV", "IM", "CALL", "CPIXFOR"]
 STAGFLATION_VARS = ["GDP", "GAP", "CPIXFOR", "CALL", "CP", "INV",
                     "EX", "IM", "IRL", "FXYEN"]
+TRANSFER_VARS = ["GDP", "GAP", "YDN", "CP", "INV", "IM", "CPIXFOR", "CALL"]
 
 
 def forward_guidance_segments(n_peg, bp):
@@ -96,9 +98,34 @@ def consumption_tax_shocks(dtau, q_hike=2, timing=True):
     return shocks
 
 
+def cash_transfer(pct, quarters, taxable=False):
+    """Scenario fields for a lump-sum transfer to households totalling `pct`% of
+    annual baseline nominal GDP, split evenly over `quarters` (1-based).
+
+    Household disposable income is YDN = YW + YP + YOSMI + YTR - YTAX + ... +
+    E_YDN. A tax-free payment goes through E_YDN; a taxable one through the
+    social benefits YTR, which also enter the income tax base
+    (YTAX = YTAXRAT*(YW+YMIXGR+YTR)), so part of it is taxed back. Either term
+    is held on the shocked path by swapping it with its innovation. Flows are at
+    annual rates, so a payment made within one quarter enters at four times its
+    size.
+    """
+    per_q = pct / len(quarters)
+    if taxable:
+        # YTR/GDPN = C_YTR(1) + C_YTR(2)*U(-1) + E_YTR
+        shocks = [("E_YTR", "add", 4 * per_q / 100, q, q) for q in quarters]
+        swap = (["E_YTR"], ["V_YTR"])
+    else:
+        shocks = [("E_YDN", "pay%", per_q, q, q) for q in quarters]
+        swap = (["E_YDN"], ["V_YDN"])
+    return dict(shocks=shocks, segments=[(H, *swap)], plot=TRANSFER_VARS,
+                transfer=(pct, quarters))
+
+
 # shocks   : (series, op, value, first quarter, last quarter)  1-based
 #            op = "mul" (scale), "add" (level), "gdp%" (add value% of baseline
-#            real GDP), "vat" (consumption tax wedge for value pp of tax rate)
+#            real GDP), "vat" (consumption tax wedge for value pp of tax rate),
+#            "pay%" (one-quarter payment of value% of annual nominal GDP)
 # segments : (number of quarters, endo2exog, exog2endo[, pinned]) in sequence;
 #            pinned = {endogenous var: pp added to baseline}, equation dropped
 SIMS = {
@@ -201,6 +228,21 @@ SIMS = {
         segments=[(8, ["POIL", "FXYEN", "CALL"], ["V_POIL", "V_FXYEN", "V_CALL"]),
                   (H - 8, ["POIL", "FXYEN"], ["V_POIL", "V_FXYEN"])],
         plot=STAGFLATION_VARS),
+    # --- cash transfers to households (not in the paper; no published benchmark) ---
+    "Sim17": dict(
+        title="Tax-free lump-sum transfer of 1% of annual nominal GDP,\n"
+              "paid in quarter 1",
+        **cash_transfer(1.0, [1])),
+    "Sim18": dict(
+        title="Taxable transfer (social benefits) of 1% of annual nominal GDP,\n"
+              "paid in quarter 1",
+        **cash_transfer(1.0, [1], taxable=True)),
+    # 2020 Special Cash Payments: 12.7344 tn yen of payments against 2020 nominal
+    # GDP of 538.2 tn yen = 2.37%, paid mostly in June-July (split evenly here).
+    "Sim19": dict(
+        title="2020 Special Cash Payments (100,000 yen per person):\n"
+              "2.37% of nominal GDP, tax-free, over 2 quarters",
+        **cash_transfer(2.37, [1, 2])),
 }
 COMPARE = [("Sim6", "Sim7", "Without vs with forward guidance (8-quarter +100bp peg)",
             "without FG", "with FG"),
@@ -217,7 +259,9 @@ COMPARE = [("Sim6", "Sim7", "Without vs with forward guidance (8-quarter +100bp 
            ("Sim14", "Sim15", "Oil +50%: exchange rate free vs the yen also 20% weaker",
             "oil only", "oil + weak yen"),
            ("Sim15", "Sim16", "Oil +50% and yen -20%: Taylor rule vs no tightening",
-            "Taylor rule", "rate pegged 8Q")]
+            "Taylor rule", "rate pegged 8Q"),
+           ("Sim17", "Sim18", "Transfer of 1% of GDP: tax-free vs taxable",
+            "tax-free", "taxable")]
 
 
 def run_sim(m, sim):
@@ -231,6 +275,10 @@ def run_sim(m, sim):
             # C_PCP(4) is the estimated pass-through of 1pp of consumption tax
             # into the consumption deflator; the CPI wedge uses the same rate.
             X[m.vidx[var], sl] += m.coefs["C_PCP"][3] * val
+        elif op == "pay%":
+            # a payment of value% of annual nominal GDP within one quarter,
+            # written at an annual rate
+            X[m.vidx[var], sl] += 4 * val / 100 * m.base[m.vidx["GDPN"], sl]
         elif op == "gdp%":
             X[m.vidx[var], sl] += val / 100 * m.base[m.vidx["GDP"], sl]
         else:
@@ -267,6 +315,17 @@ def tax_revenue(m, X, t0, t1):
     def ratio(A):
         return A[m.vidx["SNAVAT"], t0:t1 + 1] / A[m.vidx["GDPN"], t0:t1 + 1]
     return (ratio(X) - ratio(m.base)) * 100
+
+
+def transfer_effects(m, X, pct, quarters, t0, t1):
+    """Cumulative real GDP multiplier and the share of the payment spent on
+    consumption. Quarterly flows are at annual rates, hence the /4."""
+    paid = sum(pct / len(quarters) / 100 * m.base[m.vidx["GDPN"], t0 + q - 1]
+               for q in quarters)
+    pcp = m.base[m.vidx["PCP"], t0:t1 + 1].mean()
+    dy = (X[m.vidx["GDP"], t0:t1 + 1] - m.base[m.vidx["GDP"], t0:t1 + 1]) / 4
+    dc = (X[m.vidx["CPN"], t0:t1 + 1] - m.base[m.vidx["CPN"], t0:t1 + 1]) / 4
+    return np.cumsum(dy) / (paid / pcp * 100), np.cumsum(dc) / paid
 
 
 def plot(sim_name, sim, dev):
@@ -315,7 +374,7 @@ def main():
                     [np.abs(m.base[:, t0:t1 + 1]) > 1e-6])
     print(f"baseline reproduction: max relative deviation = {dev:.2e}")
 
-    rows, all_devs, mult_rows, tax_rows = [], {}, [], []
+    rows, all_devs, mult_rows, tax_rows, transfer_rows = [], {}, [], [], []
     for name, sim in SIMS.items():
         tic = time.time()
         X = run_sim(m, sim)
@@ -326,6 +385,11 @@ def main():
             per, cum = multipliers(m, X, sim["multiplier"], t0, t1)
             mult_rows += [dict(sim=name, h=h + 1, impact=p_, cumulative=c)
                           for h, (p_, c) in enumerate(zip(per, cum))]
+        if sim.get("transfer"):
+            mult, spent = transfer_effects(m, X, *sim["transfer"], t0, t1)
+            transfer_rows += [dict(sim=name, h=h + 1, cumulative_multiplier=a,
+                                   spent_share=b)
+                              for h, (a, b) in enumerate(zip(mult, spent))]
         if sim.get("tax_rate"):
             rev = tax_revenue(m, X, t0, t1)
             gdp = deviation(m, X, "GDP", t0, t1)
@@ -364,6 +428,14 @@ def main():
         print(td[td.h.isin([1, 2, 4, 8, 12, 20])].pivot_table(
             index=["sim"], columns="h",
             values=["revenue_gdp_pp", "gdp_pct"], sort=False))
+
+    if transfer_rows:
+        trd = pd.DataFrame(transfer_rows)
+        trd.to_csv(os.path.join(OUT, "transfer_effects.csv"), index=False)
+        print("\nCash transfers: cumulative real GDP multiplier and share spent on consumption")
+        print(trd[trd.h.isin([2, 4, 8, 12, 20])].pivot_table(
+            index=["sim"], columns="h",
+            values=["cumulative_multiplier", "spent_share"], sort=False))
 
 
 if __name__ == "__main__":
